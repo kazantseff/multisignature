@@ -6,6 +6,7 @@ const { developmentChains } = require("../../helper-hardhat-config");
   ? describe.skip
   : describe("MultiSig", function () {
       let multiSig, testToken, deployer, accounts;
+      const zeroAddress = "0x0000000000000000000000000000000000000000";
       const depositValue = ethers.utils.parseEther("1");
       beforeEach(async function () {
         await deployments.fixture(["all"]);
@@ -70,6 +71,37 @@ const { developmentChains } = require("../../helper-hardhat-config");
           // Which is our multisig contract becuase the transfer is being called by multisig
           // so later on we can actually transfer money from deployer to our multisig Vault
         });
+
+        it("allows to deposit ETH and updates the ETHBalance", async function () {
+          const response = await multiSig.getETHBalance();
+          await expect(response.toString()).to.equal("0");
+          await multiSig.depositToken(zeroAddress, depositValue, {
+            value: depositValue,
+          });
+          const actual = await multiSig.getETHBalance();
+          await expect(actual.toString()).to.equal(depositValue.toString());
+        });
+
+        it("emits an event when ETH was deposited", async function () {
+          await expect(
+            multiSig.depositToken(zeroAddress, depositValue, {
+              value: depositValue,
+            })
+          )
+            .to.emit(multiSig, "ETHDeposited")
+            .withArgs(depositValue);
+        });
+
+        it("reverts if user is trying to deposit ETH with any other ERC20 token at the same time", async function () {
+          await expect(
+            multiSig.depositToken(testToken.address, depositValue, {
+              value: depositValue,
+            })
+          ).to.be.revertedWith(
+            "Do not send ETH when trying to deposit other ERC20 tokens at the same time"
+          );
+        });
+
         it("reverts if token does not exist", async function () {
           await expect(multiSig.depositToken(testToken.address, depositValue))
             .to.be.revertedWithCustomError(
@@ -217,6 +249,31 @@ const { developmentChains } = require("../../helper-hardhat-config");
             "MultiSignature__AlreadyExecuted"
           );
         });
+
+        it("sets the confirmed status to true", async function () {
+          await multiSig.submitTransaction(testToken.address, depositValue);
+          const response = await multiSig.getIsConfirmed(0, deployer);
+          await expect(response).to.equal(false);
+          await multiSig.confirmTransaction(0);
+          const actual = await multiSig.getIsConfirmed(0, deployer);
+          await expect(actual).to.equal(true);
+        });
+
+        it("increments the number of confirmations of a tx", async function () {
+          await multiSig.submitTransaction(testToken.address, deployer);
+          const response = await multiSig.getNumConfirmationsOfTx(0);
+          await expect(response.toString()).to.equal("0");
+          await multiSig.confirmTransaction(0);
+          const actual = await multiSig.getNumConfirmationsOfTx(0);
+          await expect(actual.toString()).to.equal("1");
+        });
+
+        it("emits an event", async function () {
+          await multiSig.submitTransaction(testToken.address, deployer);
+          await expect(multiSig.confirmTransaction(0))
+            .to.emit(multiSig, "TransactionConfirmed")
+            .withArgs(deployer, 0);
+        });
       });
       describe("executeTransaction", function () {
         beforeEach(async function () {
@@ -258,7 +315,63 @@ const { developmentChains } = require("../../helper-hardhat-config");
           );
         });
 
-        it("withdraws money from a contract", async function () {
+        it("withdraws ETH from a contract", async function () {
+          await multiSig.depositToken(zeroAddress, depositValue, {
+            value: depositValue,
+          });
+          await multiSig.submitTransaction(zeroAddress, depositValue);
+
+          for (let i = 0; i < 3; i++) {
+            await multiSig.connect(accounts[i]).confirmTransaction(0);
+          }
+
+          const startingDeployerBalance = await multiSig.provider.getBalance(
+            deployer
+          );
+
+          const startingContractBalance = await multiSig.getETHBalance();
+
+          await expect(startingContractBalance.toString()).to.equal(
+            depositValue.toString()
+          );
+
+          const tx = await multiSig.executeTransaction(0);
+          const txReceipt = await tx.wait(1);
+          const { gasUsed, effectiveGasPrice } = txReceipt;
+          const gasCost = gasUsed.mul(effectiveGasPrice);
+
+          const endingDeployerBalance = await multiSig.provider.getBalance(
+            deployer
+          );
+          const endingContractBalance = await multiSig.getETHBalance();
+
+          await expect(endingContractBalance.toString()).to.equal("0");
+          await expect(
+            startingContractBalance.add(startingDeployerBalance).toString()
+          ).to.equal(endingDeployerBalance.add(gasCost).toString());
+        });
+
+        it("updates the ETH balance info", async function () {
+          await multiSig.depositToken(zeroAddress, depositValue, {
+            value: depositValue,
+          });
+          await multiSig.submitTransaction(zeroAddress, depositValue);
+
+          for (let i = 0; i < 3; i++) {
+            await multiSig.connect(accounts[i]).confirmTransaction(0);
+          }
+
+          const response = await multiSig.getETHBalance();
+          await expect(response.toString()).to.equal(depositValue.toString());
+          await multiSig.executeTransaction(0);
+
+          const actual = await multiSig.getETHBalance();
+          await expect(actual.toString()).to.equal(
+            response.sub(depositValue).toString()
+          );
+        });
+
+        it("withdraws ERC20 from a contract", async function () {
           await multiSig.submitTransaction(testToken.address, depositValue);
           for (let i = 0; i < 3; i++) {
             await multiSig.connect(accounts[i]).confirmTransaction(0);
@@ -298,7 +411,7 @@ const { developmentChains } = require("../../helper-hardhat-config");
           );
         });
 
-        it("updates the balance info", async function () {
+        it("updates the ERC20 balance info", async function () {
           await multiSig.submitTransaction(testToken.address, depositValue);
           for (let i = 0; i < 3; i++) {
             await multiSig.connect(accounts[i]).confirmTransaction(0);

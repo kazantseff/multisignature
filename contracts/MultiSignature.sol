@@ -42,6 +42,7 @@ contract MultiSignature {
 
   //State variables
   Transaction[] private transactions;
+  uint256 private ETHBalance; // ETH that contract holds
   address[] private i_owners;
   mapping(address => bool) private i_isOwner;
   uint256 private immutable i_numConfirmations;
@@ -77,6 +78,7 @@ contract MultiSignature {
   event TransactionExecuted(uint256 indexed _index);
   event TokenAdded(address indexed _tokenAddress);
   event TokensDeposited(address indexed _tokenAddress, uint256 indexed _amount);
+  event ETHDeposited(uint256 indexed _amount);
   event TokenWithdrawn(address indexed _tokenAddress, uint256 indexed _amount);
 
   constructor(address[] memory _owners, uint256 _numConfirmations) {
@@ -101,15 +103,26 @@ contract MultiSignature {
     emit TokenAdded(_tokenAddress);
   }
 
-  function depositToken(address _tokenAddress, uint256 _amount) public {
-    if (balanceSheet[_tokenAddress].exists == false)
-      revert MultiSignature__TokenDoesNotExist(_tokenAddress);
+  // Making it payable so you can also deposit ETH
+  function depositToken(address _tokenAddress, uint256 _amount) public payable {
+    // If the users inputs address(0) the amount will be ignored, so ETH will be deposited
+    if (_tokenAddress == address(0)) {
+      ETHBalance += msg.value;
+      emit ETHDeposited(msg.value);
+    } else {
+      require(
+        msg.value == 0,
+        "Do not send ETH when trying to deposit other ERC20 tokens at the same time"
+      );
+      if (balanceSheet[_tokenAddress].exists == false)
+        revert MultiSignature__TokenDoesNotExist(_tokenAddress);
 
-    if (_amount <= 0) revert MultiSignature__InvalidAmount();
+      if (_amount <= 0) revert MultiSignature__InvalidAmount();
 
-    IERC20(_tokenAddress).transferFrom(msg.sender, address(this), _amount);
-    balanceSheet[_tokenAddress].balance += _amount;
-    emit TokensDeposited(_tokenAddress, _amount);
+      IERC20(_tokenAddress).transferFrom(msg.sender, address(this), _amount);
+      balanceSheet[_tokenAddress].balance += _amount;
+      emit TokensDeposited(_tokenAddress, _amount);
+    }
   }
 
   // Those are for a withdraw, so it's multisig withdrawal
@@ -154,17 +167,27 @@ contract MultiSignature {
       "Invalid number of confirmations"
     );
 
-    IERC20(transactions[_txIndex].tokenAddress).transfer(
-      msg.sender,
-      transactions[_txIndex].amountToWithdraw
-    );
+    // If it's ETH thas is being withdrawn than use call
+    if (transactions[_txIndex].tokenAddress == address(0)) {
+      (bool success, ) = payable(msg.sender).call{
+        value: transactions[_txIndex].amountToWithdraw
+      }("");
+      require(success);
+      ETHBalance -= transactions[_txIndex].amountToWithdraw; // Update the ETH balance
+      // else use IERC20
+    } else {
+      IERC20(transactions[_txIndex].tokenAddress).transfer(
+        msg.sender,
+        transactions[_txIndex].amountToWithdraw
+      );
 
-    // Extract the amountToWithdraw from the balance of the token
-    balanceSheet[transactions[_txIndex].tokenAddress].balance -= transactions[
-      _txIndex
-    ].amountToWithdraw;
+      // Extract the amountToWithdraw from the balance of the token
+      balanceSheet[transactions[_txIndex].tokenAddress].balance -= transactions[
+        _txIndex
+      ].amountToWithdraw;
+    }
+
     transactions[_txIndex].executed = true;
-
     emit TransactionExecuted(_txIndex);
   }
 
@@ -223,5 +246,16 @@ contract MultiSignature {
     uint256 index
   ) public view returns (uint256) {
     return transactions[index].numConfirmations;
+  }
+
+  function getETHBalance() public view returns (uint256) {
+    return ETHBalance;
+  }
+
+  function getIsConfirmed(
+    uint256 index,
+    address owner
+  ) public view returns (bool) {
+    return isConfirmed[index][owner];
   }
 }
